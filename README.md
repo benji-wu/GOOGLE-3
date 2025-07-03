@@ -1,16 +1,33 @@
 import re
 import pdfplumber
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils.embedding_functions import EmbeddingFunction
+import google.generativeai as genai
 
+# ✅ 1. 設定 Gemini API 金鑰
+genai.configure(api_key="YOUR_GEMINI_API_KEY")  # ← 換成你自己的金鑰
+
+
+# ✅ 2. 定義 Gemini 嵌入函數
+class GeminiEmbeddingFunction(EmbeddingFunction):
+    def __call__(self, texts):
+        if isinstance(texts, str):
+            texts = [texts]
+
+        embeddings = []
+        for text in texts:
+            response = genai.embed_content(
+                model="models/embedding-001",
+                content=text,
+                task_type="retrieval_document"
+            )
+            embeddings.append(response["embedding"])
+        return embeddings
+
+
+# ✅ 3. 從 PDF 提取文字
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """
-    從 PDF 提取完整文字。
-    
-    Args:
-        pdf_path (str): PDF 檔案路徑。
-    
-    Returns:
-        str: 合併後的所有頁面文字。
-    """
     full_text = ""
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -20,22 +37,9 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     return full_text.strip()
 
 
+# ✅ 4. 將文字分割成語意 chunk
 def split_text(text: str, max_chunk_size=500, overlap=100) -> list:
-    """
-    將輸入文字依語意分割成數個 chunk，以利後續搜尋與檢索。
-
-    Args:
-        text (str): 從 PDF 提取的全文字串。
-        max_chunk_size (int): 每個 chunk 的最大字元數。
-        overlap (int): chunk 間重疊的字元數（保持上下文連貫性）。
-
-    Returns:
-        List[str]: 分割後的文字塊列表。
-    """
-    # 清理多餘空白
     text = re.sub(r'\s+', ' ', text).strip()
-    
-    # 以標點符號作為句子分隔依據
     sentence_delimiters = re.compile(r'(?<=[.!?。！？])\s')
     sentences = sentence_delimiters.split(text)
 
@@ -47,7 +51,6 @@ def split_text(text: str, max_chunk_size=500, overlap=100) -> list:
             current_chunk += sentence + " "
         else:
             chunks.append(current_chunk.strip())
-            # 重疊部分的設置（維持上下文）
             if overlap > 0:
                 current_chunk = current_chunk[-overlap:] + sentence + " "
             else:
@@ -59,13 +62,27 @@ def split_text(text: str, max_chunk_size=500, overlap=100) -> list:
     return chunks
 
 
-# ✅ 使用範例
-if __name__ == "__main__":
-    pdf_path = "your_file.pdf"  # ← 請替換為實際 PDF 路徑
-    full_text = extract_text_from_pdf(pdf_path)
-    text_chunks = split_text(full_text, max_chunk_size=500, overlap=100)
+# ✅ 5. 建立與儲存 ChromaDB 資料庫
+def create_chroma_db(documents, path="./chroma_db", name="pdf_chunks"):
+    client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory=path))
+    embedding_function = GeminiEmbeddingFunction()
+    collection = client.get_or_create_collection(name=name, embedding_function=embedding_function)
 
-    for i, chunk in enumerate(text_chunks):
-        print(f"--- Chunk {i+1} ---")
-        print(chunk)
-        print()
+    ids = [f"doc_{i}" for i in range(len(documents))]
+    collection.add(documents=documents, ids=ids)
+
+    client.persist()
+    return collection
+
+
+# ✅ 6. 主流程整合
+if __name__ == "__main__":
+    pdf_path = "your_file.pdf"  # ← 替換成你的 PDF 路徑
+    full_text = extract_text_from_pdf(pdf_path)
+    chunks = split_text(full_text)
+
+    print(f"📄 讀取完成，共分割為 {len(chunks)} 個文字塊")
+
+    collection = create_chroma_db(chunks, path="./chroma_db", name="example_pdf")
+
+    print(f"✅ 已建立向量資料庫並儲存，共新增 {len(chunks)} 筆嵌入文字")
